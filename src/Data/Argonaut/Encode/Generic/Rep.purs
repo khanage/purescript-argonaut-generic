@@ -3,10 +3,11 @@ module Data.Argonaut.Encode.Generic.Rep (
   class EncodeRepArgs,
   class EncodeRepFields,
   class EncodeLiteral,
-  encodeRep,
+  encodeRepOptions,
   encodeRepArgs,
   encodeRepFields,
   genericEncodeJson,
+  genericEncodeJsonWith,
   encodeLiteralSum,
   encodeLiteralSumWithTransform,
   encodeLiteral
@@ -16,58 +17,65 @@ import Prelude
 
 import Data.Argonaut.Core (Json, fromArray, fromObject, fromString)
 import Data.Argonaut.Encode.Class (class EncodeJson, encodeJson)
+import Data.Argonaut.Options (Options(..), SumEncoding(..), defaultOptions)
 import Data.Generic.Rep as Rep
 import Data.StrMap as SM
 import Data.Symbol (class IsSymbol, SProxy(..), reflectSymbol)
 import Partial.Unsafe (unsafeCrashWith)
 
 class EncodeRep r where
-  encodeRep :: r -> Json
+  encodeRepOptions :: Options -> r -> Json
 
 instance encodeRepNoConstructors :: EncodeRep Rep.NoConstructors where
-  encodeRep r = encodeRep r
+  encodeRepOptions o r = encodeRepOptions o r
 
 instance encodeRepSum :: (EncodeRep a, EncodeRep b) => EncodeRep (Rep.Sum a b) where
-  encodeRep (Rep.Inl a) = encodeRep a
-  encodeRep (Rep.Inr b) = encodeRep b
+  encodeRepOptions options (Rep.Inl a) = encodeRepOptions options a
+  encodeRepOptions options (Rep.Inr b) = encodeRepOptions options b
 
 instance encodeRepConstructor :: (IsSymbol name, EncodeRepArgs a) => EncodeRep (Rep.Constructor name a) where
-  encodeRep (Rep.Constructor a) =
-    fromObject
-      $ SM.insert "tag" (fromString (reflectSymbol (SProxy :: SProxy name)))
-      $ SM.insert "values" (fromArray (encodeRepArgs a))
-      $ SM.empty
+  encodeRepOptions o@(Options options) (Rep.Constructor a) =
+    case options.sumEncoding of
+      TaggedObject {tagFieldName, contentsFieldName } ->
+        fromObject
+          $ SM.insert tagFieldName (fromString (options.constructorTagModifier (reflectSymbol (SProxy :: SProxy name))))
+          $ SM.insert contentsFieldName (fromArray (encodeRepArgs o a))
+          $ SM.empty
 
 class EncodeRepArgs r where
-  encodeRepArgs :: r -> Array Json
+  encodeRepArgs :: Options -> r -> Array Json
 
 instance encodeRepArgsNoArguments :: EncodeRepArgs Rep.NoArguments where
-  encodeRepArgs Rep.NoArguments = []
+  encodeRepArgs _ Rep.NoArguments = []
 
 instance encodeRepArgsProduct :: (EncodeRepArgs a, EncodeRepArgs b) => EncodeRepArgs (Rep.Product a b) where
-  encodeRepArgs (Rep.Product a b) = encodeRepArgs a <> encodeRepArgs b
+  encodeRepArgs o (Rep.Product a b) = encodeRepArgs o a <> encodeRepArgs o b
 
 instance encodeRepArgsArgument :: (EncodeJson a) => EncodeRepArgs (Rep.Argument a) where
-  encodeRepArgs (Rep.Argument a) = [encodeJson a]
+  encodeRepArgs _ (Rep.Argument a) = [encodeJson a]
 
 instance encodeRepArgsRec :: (EncodeRepFields fields) => EncodeRepArgs (Rep.Rec fields) where
-  encodeRepArgs (Rep.Rec fields) = [fromObject $ encodeRepFields fields]
+  encodeRepArgs o (Rep.Rec fields) = [fromObject $ encodeRepFields o fields]
 
 class EncodeRepFields r where
-  encodeRepFields :: r -> SM.StrMap Json
+  encodeRepFields :: Options -> r -> SM.StrMap Json
 
 instance encodeRepFieldsProduct :: (EncodeRepFields a, EncodeRepFields b) => EncodeRepFields (Rep.Product a b) where
-  encodeRepFields (Rep.Product a b) =
-    SM.union (encodeRepFields a) (encodeRepFields b)
+  encodeRepFields o (Rep.Product a b) =
+    SM.union (encodeRepFields o a) (encodeRepFields o b)
 
 instance encodeRepFieldsField :: (IsSymbol field, EncodeJson a) => EncodeRepFields (Rep.Field field a) where
-  encodeRepFields (Rep.Field a) =
-    SM.singleton (reflectSymbol (SProxy :: SProxy field))
+  encodeRepFields (Options options) (Rep.Field a) =
+    SM.singleton (options.fieldLabelModifier (reflectSymbol (SProxy :: SProxy field)))
                  (encodeJson a)
 
 -- | Encode any `Generic` data structure into `Json`.
 genericEncodeJson :: forall a r. Rep.Generic a r => EncodeRep r => a -> Json
-genericEncodeJson = encodeRep <<< Rep.from
+genericEncodeJson = genericEncodeJsonWith defaultOptions
+
+-- | Encode any `Generic` data structure into `Json` with options controlling serialisation.
+genericEncodeJsonWith :: forall a r. Rep.Generic a r => EncodeRep r => Options -> a -> Json
+genericEncodeJsonWith options = encodeRepOptions options <<< Rep.from
 
 -- | A function for encoding `Generic` sum types using string literal representations
 encodeLiteralSum :: forall a r. Rep.Generic a r => EncodeLiteral r => a -> Json
